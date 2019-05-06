@@ -2,22 +2,17 @@ package mcproto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
-	"strings"
-
-	"github.com/sirupsen/logrus"
+	"math"
 )
-
-type Frame struct {
-	Length  int
-	Payload []byte
-}
 
 type Packet struct {
 	Length   int
 	PacketID int
-	Data     []byte
+	Data     *bytes.Buffer
 }
 
 const PacketIdHandshake = 0x00
@@ -33,125 +28,160 @@ type ByteReader interface {
 	ReadByte() (byte, error)
 }
 
-func ReadVarInt(reader io.Reader) (int, error) {
-	b := make([]byte, 1)
-	var numRead uint = 0
-	result := 0
-	for numRead <= 5 {
-		n, err := reader.Read(b)
-		if err != nil {
-			logrus.WithError(err).WithFields(logrus.Fields{
-				"b":       b,
-				"numRead": numRead,
-				"result":  result,
-				"n":       n,
-			}).Infof("")
-			return 0, err
-		}
-		if n == 0 {
-			continue
-		}
-		value := b[0] & 0x7F
-		result |= int(value) << (7 * numRead)
-
-		numRead++
-
-		if b[0]&0x80 == 0 {
-			return result, nil
-		}
-	}
-
-	return 0, errors.New("VarInt is too big")
-}
-
-func ReadString(reader io.Reader) (string, error) {
+func ReadString(reader io.Reader) (val string, err error) {
 	length, err := ReadVarInt(reader)
 	if err != nil {
-		return "", err
+		return
 	}
+	if length < 0 {
+		err = errors.New(fmt.Sprintf("Decode, String length is belowero: %d", length))
+		return
+	}
+	if length > 1048576 { // 2^(21-1)
+		err = errors.New(fmt.Sprintf("Decode, String length is above maximum: %d", length))
+		return
+	}
+	bytes := make([]byte, length)
+	_, err = reader.Read(bytes)
+	if err != nil {
+		return
+	}
+	val = string(bytes)
+	return
+}
 
-	b := make([]byte, 1)
-	var strBuilder strings.Builder
-	for i := 0; i < length; i++ {
-		n, err := reader.Read(b)
+func ReadVarInt(reader io.Reader) (result int, err error) {
+	var bytes byte = 0
+	var b byte
+
+	for {
+		b, err = ReadUint8(reader)
 		if err != nil {
-			return "", err
+			return
 		}
-		if n == 0 {
+		result |= int(uint(b&0x7F) << uint(bytes*7))
+		bytes++
+		if bytes > 5 {
+			err = errors.New("Decode, VarInt is too long")
+			return
+		}
+		if (b & 0x80) == 0x80 {
 			continue
 		}
-		strBuilder.WriteByte(b[0])
+		break
 	}
 
-	return strBuilder.String(), nil
+	return
 }
 
-func ReadUnsignedShort(reader io.Reader) (uint16, error) {
-	upper := make([]byte, 1)
-	_, err := reader.Read(upper)
+func ReadBool(reader io.Reader) (val bool, err error) {
+	uval, err := ReadUint8(reader)
 	if err != nil {
-		return 0, err
+		return
 	}
-	lower := make([]byte, 1)
-	_, err = reader.Read(lower)
-	if err != nil {
-		return 0, err
-	}
-
-	return (uint16(upper[0]) << 8) | uint16(lower[0]), nil
+	val = uval != 0
+	return
 }
 
-func ReadFrame(reader io.Reader) (*Frame, error) {
-	var err error
-	frame := &Frame{}
+func ReadInt8(reader io.Reader) (val int8, err error) {
+	uval, err := ReadUint8(reader)
+	val = int8(uval)
+	return
+}
 
-	frame.Length, err = ReadVarInt(reader)
-	if err != nil {
-		return nil, err
-	}
+func ReadUint8(reader io.Reader) (val uint8, err error) {
+	var protocol [1]byte
+	_, err = reader.Read(protocol[:1])
+	val = protocol[0]
+	return
+}
 
-	frame.Payload = make([]byte, frame.Length)
-	total := 0
-	for total < frame.Length {
-		readIntoThis := frame.Payload[total:]
-		n, err := reader.Read(readIntoThis)
-		if err != nil {
-			if err != io.EOF {
-				return nil, err
-			}
-		}
-		total += n
-	}
+func ReadInt16(reader io.Reader) (val int16, err error) {
+	uval, err := ReadUint16(reader)
+	val = int16(uval)
+	return
+}
 
-	return frame, nil
+func ReadUint16(reader io.Reader) (val uint16, err error) {
+	var protocol [2]byte
+	_, err = reader.Read(protocol[:2])
+	val = binary.BigEndian.Uint16(protocol[:2])
+	return
+}
+
+func ReadInt32(reader io.Reader) (val int32, err error) {
+	uval, err := ReadUint32(reader)
+	val = int32(uval)
+	return
+}
+
+func ReadUint32(reader io.Reader) (val uint32, err error) {
+	var protocol [4]byte
+	_, err = reader.Read(protocol[:4])
+	val = binary.BigEndian.Uint32(protocol[:4])
+	return
+}
+
+func ReadInt64(reader io.Reader) (val int64, err error) {
+	uval, err := ReadUint64(reader)
+	val = int64(uval)
+	return
+}
+
+func ReadUint64(reader io.Reader) (val uint64, err error) {
+	var protocol [8]byte
+	_, err = reader.Read(protocol[:8])
+	val = binary.BigEndian.Uint64(protocol[:8])
+	return
+}
+
+func ReadFloat32(reader io.Reader) (val float32, err error) {
+	ival, err := ReadUint32(reader)
+	val = math.Float32frombits(ival)
+	return
+}
+
+func ReadFloat64(reader io.Reader) (val float64, err error) {
+	ival, err := ReadUint64(reader)
+	val = math.Float64frombits(ival)
+	return
 }
 
 func ReadPacket(reader io.Reader) (*Packet, error) {
-
-	frame, err := ReadFrame(reader)
+	// borrowed from https://github.com/justblender/gominet/blob/master/protocol/connection.go
+	length, err := ReadVarInt(reader)
 	if err != nil {
 		return nil, err
 	}
 
-	packet := &Packet{Length: frame.Length}
+	if length < 0 || length > 1048576 { // 2^(21-1)
+		return nil, errors.New("VarInt has invalid size")
+	}
 
-	remainder := bytes.NewBuffer(frame.Payload)
+	payload := make([]byte, length)
+	_, err = io.ReadFull(reader, payload)
 
-	packet.PacketID, err = ReadVarInt(remainder)
 	if err != nil {
-		logrus.WithField("remainder", remainder.String()).Info("Failed to find PacketID")
 		return nil, err
 	}
 
-	packet.Data = remainder.Bytes()
+	buffer := bytes.NewBuffer(payload)
+	id, err := ReadVarInt(buffer)
 
-	return packet, nil
+	if err != nil {
+		return nil, err
+	}
+
+	return &Packet{
+		Length:   length,
+		PacketID: id,
+		Data:     buffer,
+	}, nil
 }
 
-func ReadHandshake(data []byte) (*Handshake, error) {
+func ReadHandshake(buffer *bytes.Buffer) (*Handshake, error) {
 
 	handshake := &Handshake{}
-	buffer := bytes.NewBuffer(data)
 	var err error
 
 	handshake.ProtocolVersion, err = ReadVarInt(buffer)
@@ -164,7 +194,7 @@ func ReadHandshake(data []byte) (*Handshake, error) {
 		return nil, err
 	}
 
-	handshake.ServerPort, err = ReadUnsignedShort(buffer)
+	handshake.ServerPort, err = ReadUint16(buffer)
 	if err != nil {
 		return nil, err
 	}

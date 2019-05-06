@@ -124,11 +124,10 @@ func pumpConnections(ctx context.Context, frontendConn, backendConn net.Conn) {
 	for {
 		select {
 		case err := <-errors:
-			if err != io.EOF {
-				logrus.WithError(err).Error("Error observed on connection relay")
+			if err == io.EOF {
+				return
 			}
-
-			return
+			logrus.WithError(err).Error("Error observed on connection relay")
 
 		case <-ctx.Done():
 			return
@@ -148,6 +147,8 @@ func pumpFrames(incoming io.Reader, outgoing io.Writer, errors chan<- error, fro
 			errors <- err
 			continue
 		}
+		logrus.Infof("inspectionBuffer: %s", inspectionBuffer)
+		logrus.Infof("packet.Data: %s", packet.Data)
 		amount, err := io.Copy(outgoing, inspectionBuffer)
 		if err != nil {
 			errors <- err
